@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: reviewsapi
+  namespace: fcg-reviews
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: reviewsapi
+  template:
+    metadata:
+      labels:
+        app: reviewsapi
+    spec:
+      containers:
+        - name: reviewsapi
+          image: <SEU_ECR>/fcg-reviews-api:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: ASPNETCORE_URLS
+              value: "http://+:8080"
+            - name: ASPNETCORE_ENVIRONMENT
+              value: "Production"
+            - name: MongoDB__DatabaseName
+              value: "fcg_reviews"
+            - name: MongoDB__ConnectionString
+              valueFrom:
+                secretKeyRef:
+                  name: reviewsapi-secret
+                  key: MongoDB__ConnectionString
+            - name: Jwt__SecretKey
+              valueFrom:
+                secretKeyRef:
+                  name: reviewsapi-secret
+                  key: Jwt__SecretKey
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
