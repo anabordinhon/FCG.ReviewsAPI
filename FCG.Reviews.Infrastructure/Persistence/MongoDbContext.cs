@@ -8,10 +8,16 @@ public class MongoDbContext
 {
     private readonly IMongoDatabase _database;
 
+    // MongoDbContext.cs
     public MongoDbContext(IConfiguration configuration)
     {
         var client = new MongoClient(configuration["MongoDB:ConnectionString"]);
         _database = client.GetDatabase(configuration["MongoDB:DatabaseName"]);
+
+        var indexKeys = Builders<Review>.IndexKeys
+            .Ascending(r => r.GameId)
+            .Ascending(r => r.UserId);
+        Reviews.Indexes.CreateOne(new CreateIndexModel<Review>(indexKeys));
     }
 
     public IMongoCollection<Review> Reviews =>
