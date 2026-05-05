@@ -10,20 +10,6 @@ stringData:
   MONGO_URI: "mongodb://admin:Admin123456!@mongodb-service:27017/?authSource=admin"
 
 ---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mongodb-pvc
-  namespace: fcg-reviews
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 5Gi
-  storageClassName: gp2
-
----
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -89,8 +75,7 @@ spec:
               memory: "512Mi"
       volumes:
         - name: mongodb-storage
-          persistentVolumeClaim:
-            claimName: mongodb-pvc
+          emptyDir: {}
 
 ---
 apiVersion: v1
