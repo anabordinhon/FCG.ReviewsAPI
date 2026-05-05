@@ -1,0 +1,180 @@
+name: CI/CD - ReviewsApi to EKS
+
+on:
+  push:
+    branches: [ "master" ]
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: fcg-eks
+  NAMESPACE: fcg-reviews
+  IMAGE_TAG: ${{ github.sha }}
+
+# ─────────────────────────────────────────────────────────────────
+# Pipeline dividido em 3 jobs sequenciais.
+# Se um job falha, os seguintes não executam.
+# ─────────────────────────────────────────────────────────────────
+
+jobs:
+
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 1 — BUILD & TEST
+  # ═══════════════════════════════════════════════════════════════
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore dependencies
+        run: dotnet restore
+        working-directory: ./FCG.Reviews
+
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+        working-directory: ./FCG.Reviews
+
+      - name: Run unit tests
+        run: dotnet test --configuration Release --no-build --verbosity normal
+        working-directory: ./FCG.Reviews
+
+
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 2 — CONTAINERIZE, SCAN & PUSH
+  # ═══════════════════════════════════════════════════════════════
+  containerize-and-push:
+    name: Containerize, Scan & Push
+    runs-on: ubuntu-latest
+    needs: build-and-test
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      # Build local primeiro (sem push) para rodar o scan de segurança
+      - name: Build API image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./FCG.Reviews
+          file: ./FCG.Reviews/FCG.Reviews.API/Dockerfile
+          push: false
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/reviews-api-image:latest
+            ${{ secrets.DOCKER_USERNAME }}/reviews-api-image:${{ env.IMAGE_TAG }}
+          load: true
+
+      # Scan de vulnerabilidades — bloqueia push se houver CRITICAL ou HIGH
+      - name: Security scan - API image (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ secrets.DOCKER_USERNAME }}/reviews-api-image:${{ env.IMAGE_TAG }}
+          format: table
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+
+      # Push somente após o scan passar
+      - name: Push API image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./FCG.Reviews
+          file: ./FCG.Reviews/FCG.Reviews.API/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/reviews-api-image:latest
+            ${{ secrets.DOCKER_USERNAME }}/reviews-api-image:${{ env.IMAGE_TAG }}
+
+
+  # ═══════════════════════════════════════════════════════════════
+  # JOB 3 — DEPLOY
+  # ═══════════════════════════════════════════════════════════════
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: containerize-and-push
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'v1.32.0'
+
+      - name: Update kubeconfig for EKS
+        run: |
+          aws eks update-kubeconfig \
+            --name ${{ env.EKS_CLUSTER_NAME }} \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Apply namespace
+        run: kubectl apply -f FCG.Reviews/k8s/reviewsapi-namespace.yaml
+
+      # Sobe o MongoDB StatefulSet antes da API
+      - name: Deploy MongoDB StatefulSet
+        run: |
+          kubectl apply -f FCG.Reviews/k8s/mongodb-statefulset.yaml
+          # Aguarda MongoDB ficar pronto antes de continuar
+          kubectl rollout status statefulset/mongodb \
+            -n ${{ env.NAMESPACE }} \
+            --timeout=180s
+
+      # Cria/atualiza o Secret da reviewsapi
+      # MongoDB__ConnectionString aponta para o service interno do cluster
+      - name: Create or update Kubernetes Secret
+        run: |
+          kubectl create secret generic reviewsapi-secret \
+            --namespace=${{ env.NAMESPACE }} \
+            --from-literal=MongoDB__ConnectionString="mongodb://admin:${{ secrets.MONGO_ROOT_PASS }}@mongodb-service:27017/?authSource=admin" \
+            --from-literal=Jwt__SecretKey="${{ secrets.JWT_SECRET_KEY }}" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      # Rolling Update — zero downtime
+      - name: Deploy reviewsapi (Rolling Update)
+        run: |
+          kubectl apply -f FCG.Reviews/k8s/reviewsapi-deployment.yaml
+          kubectl apply -f FCG.Reviews/k8s/reviewsapi-service.yaml
+
+          kubectl set image deployment/reviewsapi \
+            reviewsapi=${{ secrets.DOCKER_USERNAME }}/reviews-api-image:${{ env.IMAGE_TAG }} \
+            -n ${{ env.NAMESPACE }}
+
+          kubectl rollout status deployment/reviewsapi \
+            -n ${{ env.NAMESPACE }} \
+            --timeout=180s
+
+      - name: Show deployment status
+        if: always()
+        run: |
+          echo "========== PODS =========="
+          kubectl get pods -n ${{ env.NAMESPACE }} -o wide
+          echo "========== SERVICES =========="
+          kubectl get svc -n ${{ env.NAMESPACE }}
+          echo "========== IMAGEM DEPLOYADA =========="
+          kubectl get deployment reviewsapi -n ${{ env.NAMESPACE }} \
+            -o jsonpath='{.spec.template.spec.containers[0].image}'
+          echo ""
+          echo "========== EVENTOS =========="
+          kubectl get events -n ${{ env.NAMESPACE }} --sort-by='.lastTimestamp' | tail -20
