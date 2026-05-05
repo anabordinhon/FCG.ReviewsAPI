@@ -35,15 +35,15 @@ jobs:
 
       - name: Restore dependencies
         run: dotnet restore
-        working-directory: ./FCG.Reviews
+        working-directory: .
 
       - name: Build
         run: dotnet build --configuration Release --no-restore
-        working-directory: ./FCG.Reviews
+        working-directory: .
 
       - name: Run unit tests
         run: dotnet test --configuration Release --no-build --verbosity normal
-        working-directory: ./FCG.Reviews
+        working-directory: .
 
 
   # ═══════════════════════════════════════════════════════════════
@@ -68,8 +68,8 @@ jobs:
       - name: Build API image
         uses: docker/build-push-action@v5
         with:
-          context: ./FCG.Reviews
-          file: ./FCG.Reviews/FCG.Reviews.API/Dockerfile
+          context: .
+          file: ./FCG.Reviews.API/Dockerfile
           push: false
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/reviews-api-image:latest
@@ -130,12 +130,12 @@ jobs:
             --region ${{ env.AWS_REGION }}
 
       - name: Apply namespace
-        run: kubectl apply -f FCG.Reviews/k8s/reviewsapi-namespace.yaml
+        run: kubectl apply -f k8s/reviewsapi-namespace.yaml
 
       # Sobe o MongoDB StatefulSet antes da API
       - name: Deploy MongoDB StatefulSet
         run: |
-          kubectl apply -f FCG.Reviews/k8s/mongodb-statefulset.yaml
+          kubectl apply -f k8s/mongodb-statefulset.yaml
           # Aguarda MongoDB ficar pronto antes de continuar
           kubectl rollout status statefulset/mongodb \
             -n ${{ env.NAMESPACE }} \
@@ -154,8 +154,8 @@ jobs:
       # Rolling Update — zero downtime
       - name: Deploy reviewsapi (Rolling Update)
         run: |
-          kubectl apply -f FCG.Reviews/k8s/reviewsapi-deployment.yaml
-          kubectl apply -f FCG.Reviews/k8s/reviewsapi-service.yaml
+          kubectl apply -f k8s/reviewsapi-deployment.yaml
+          kubectl apply -f k8s/reviewsapi-service.yaml
 
           kubectl set image deployment/reviewsapi \
             reviewsapi=${{ secrets.DOCKER_USERNAME }}/reviews-api-image:${{ env.IMAGE_TAG }} \
