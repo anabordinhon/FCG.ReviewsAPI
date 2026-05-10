@@ -10,11 +10,6 @@ env:
   NAMESPACE: fcg-reviews
   IMAGE_TAG: ${{ github.sha }}
 
-# ─────────────────────────────────────────────────────────────────
-# Pipeline dividido em 3 jobs sequenciais.
-# Se um job falha, os seguintes não executam.
-# ─────────────────────────────────────────────────────────────────
-
 jobs:
 
   # ═══════════════════════════════════════════════════════════════
@@ -35,15 +30,12 @@ jobs:
 
       - name: Restore dependencies
         run: dotnet restore
-        working-directory: .
 
       - name: Build
         run: dotnet build --configuration Release --no-restore
-        working-directory: .
 
       - name: Run unit tests
         run: dotnet test --configuration Release --no-build --verbosity normal
-        working-directory: .
 
 
   # ═══════════════════════════════════════════════════════════════
@@ -64,19 +56,20 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # Build local primeiro (sem push) para rodar o scan de segurança
+      # Build local da imagem
       - name: Build API image
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./FCG.Reviews.API/Dockerfile
           push: false
+          load: true
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/reviews-api-image:latest
             ${{ secrets.DOCKER_USERNAME }}/reviews-api-image:${{ env.IMAGE_TAG }}
-          load: true
 
-      # Scan de vulnerabilidades — bloqueia push se houver CRITICAL ou HIGH
+      # Scan de segurança
+      # Bloqueia pipeline se houver HIGH ou CRITICAL
       - name: Security scan - API image (Trivy)
         uses: aquasecurity/trivy-action@master
         with:
@@ -86,7 +79,7 @@ jobs:
           ignore-unfixed: true
           severity: 'CRITICAL,HIGH'
 
-      # Push somente após o scan passar
+      # Push somente após scan passar
       - name: Push API image
         uses: docker/build-push-action@v5
         with:
@@ -129,52 +122,63 @@ jobs:
             --name ${{ env.EKS_CLUSTER_NAME }} \
             --region ${{ env.AWS_REGION }}
 
+      # Namespace
       - name: Apply namespace
         run: kubectl apply -f k8s/reviewsapi-namespace.yaml
 
-      # Sobe o MongoDB StatefulSet antes da API
-      - name: Deploy MongoDB StatefulSet
-        run: |
-          kubectl apply -f k8s/mongodb-statefulset.yaml
-          # Aguarda MongoDB ficar pronto antes de continuar
-          kubectl rollout status statefulset/mongodb \
-            -n ${{ env.NAMESPACE }} \
-            --timeout=180s
-
-      # Cria/atualiza o Secret da reviewsapi
-      # MongoDB__ConnectionString aponta para o service interno do cluster
+      # Secret da aplicação
       - name: Create or update Kubernetes Secret
         run: |
           kubectl create secret generic reviewsapi-secret \
             --namespace=${{ env.NAMESPACE }} \
-            --from-literal=MongoDB__ConnectionString="mongodb://admin:${{ secrets.MONGO_ROOT_PASS }}@mongodb-service:27017/?authSource=admin" \
+            --from-literal=MongoDB__ConnectionString="mongodb://admin:${{ secrets.MONGO_ROOT_PASS }}@mongodb:27017/?authSource=admin" \
             --from-literal=Jwt__SecretKey="${{ secrets.JWT_SECRET_KEY }}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
-      # Rolling Update — zero downtime
-      - name: Deploy reviewsapi (Rolling Update)
+      # Deploy da API
+      - name: Deploy ReviewsAPI
         run: |
           kubectl apply -f k8s/reviewsapi-deployment.yaml
           kubectl apply -f k8s/reviewsapi-service.yaml
 
+      # Atualiza imagem (Rolling Update)
+      - name: Update deployment image
+        run: |
           kubectl set image deployment/reviewsapi \
             reviewsapi=${{ secrets.DOCKER_USERNAME }}/reviews-api-image:${{ env.IMAGE_TAG }} \
             -n ${{ env.NAMESPACE }}
 
+      # Aguarda rollout finalizar
+      - name: Wait for rollout
+        run: |
           kubectl rollout status deployment/reviewsapi \
             -n ${{ env.NAMESPACE }} \
             --timeout=180s
 
+      # Debug final
       - name: Show deployment status
         if: always()
         run: |
+          echo "========== DEPLOYMENTS =========="
+          kubectl get deployments -n ${{ env.NAMESPACE }}
+
+          echo ""
           echo "========== PODS =========="
           kubectl get pods -n ${{ env.NAMESPACE }} -o wide
+
+          echo ""
           echo "========== SERVICES =========="
           kubectl get svc -n ${{ env.NAMESPACE }}
+
+          echo ""
           echo "========== IMAGEM DEPLOYADA =========="
-          kubectl get deployment reviewsapi -n ${{ env.NAMESPACE }} \
+          kubectl get deployment reviewsapi \
+            -n ${{ env.NAMESPACE }} \
             -o jsonpath='{.spec.template.spec.containers[0].image}'
+
+          echo ""
           echo ""
           echo "========== EVENTOS =========="
-          kubectl get events -n ${{ env.NAMESPACE }} --sort-by='.lastTimestamp' | tail -20
+          kubectl get events \
+            -n ${{ env.NAMESPACE }} \
+            --sort-by='.lastTimestamp' | tail -20
