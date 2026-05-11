@@ -131,7 +131,7 @@ jobs:
         run: |
           kubectl create secret generic reviewsapi-secret \
             --namespace=${{ env.NAMESPACE }} \
-            --from-literal=MongoDB__ConnectionString="mongodb://admin:${{ secrets.MONGO_ROOT_PASS }}@mongodb:27017/?authSource=admin" \
+            --from-literal=MongoDB__ConnectionString="mongodb://admin:${{ secrets.MONGO_ROOT_PASS }}@mongodb-service:27017/?authSource=admin" \
             --from-literal=Jwt__SecretKey="${{ secrets.JWT_SECRET_KEY }}" \
             --dry-run=client -o yaml | kubectl apply -f -
 
